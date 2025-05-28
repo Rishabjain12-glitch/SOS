@@ -1,0 +1,163 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.base import BaseEstimator, RegressorMixin
+
+# Custom Cascade Forest Regressor Implementation
+class CascadeForestRegressor(BaseEstimator, RegressorMixin):
+    def __init__(self, n_layers=3, n_estimators=100, max_depth=None, random_state=None):
+        self.n_layers = n_layers
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.random_state = random_state
+        self.layers = []
+        
+    def fit(self, X, y):
+        # Convert to DataFrame if not already
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        
+        X_current = X.copy()
+        
+        for i in range(self.n_layers):
+            # Create new random forest for this layer
+            rf = RandomForestRegressor(
+                n_estimators=self.n_estimators,
+                max_depth=self.max_depth,
+                random_state=self.random_state + i if self.random_state else None
+            )
+            
+            rf.fit(X_current, y)
+            self.layers.append(rf)
+            
+            # Add predictions as new feature for next layer (except last layer)
+            if i < self.n_layers - 1:
+                preds = rf.predict(X_current).reshape(-1, 1)
+                X_current = pd.concat([
+                    X_current, 
+                    pd.DataFrame(preds, columns=[f'layer_{i}_pred'], index=X_current.index)
+                ], axis=1)
+        
+        return self
+    
+    def predict(self, X):
+        # Convert to DataFrame if not already
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+            
+        X_current = X.copy()
+        
+        for i, rf in enumerate(self.layers):
+            preds = rf.predict(X_current).reshape(-1, 1)
+            
+            # Add predictions as new feature for next layer (except last layer)
+            if i < len(self.layers) - 1:
+                X_current = pd.concat([
+                    X_current, 
+                    pd.DataFrame(preds, columns=[f'layer_{i}_pred'], index=X_current.index)
+                ], axis=1)
+        
+        return preds.flatten()
+
+# Load and preprocess the data from file
+def load_and_preprocess_data():
+    df = pd.read_csv('Housing.csv')
+    
+    # Convert categorical variables to numerical
+    cat_cols = ['mainroad', 'guestroom', 'basement', 'hotwaterheating', 
+                'airconditioning', 'prefarea', 'furnishingstatus']
+    
+    for col in cat_cols:
+        df[col] = df[col].map({'yes': 1, 'no': 0, 'furnished': 2, 'semi-furnished': 1, 'unfurnished': 0})
+    
+    return df
+
+# Main function
+def main():
+    # Load and preprocess data
+    df = load_and_preprocess_data()
+    
+    # Separate features and target
+    X = df.drop('price', axis=1)
+    y = df['price']
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    # Scale numerical features
+    num_cols = ['area', 'bedrooms', 'bathrooms', 'stories', 'parking']
+    scaler = StandardScaler()
+    X_train[num_cols] = scaler.fit_transform(X_train[num_cols])
+    X_test[num_cols] = scaler.transform(X_test[num_cols])
+    
+    # Initialize and train the Cascade Forest model
+    cascade_forest = CascadeForestRegressor(
+        n_layers=3,
+        n_estimators=100,
+        max_depth=None,
+        random_state=42
+    )
+    
+    cascade_forest.fit(X_train, y_train)
+    
+    # Make predictions
+    y_pred_train = cascade_forest.predict(X_train)
+    y_pred_test = cascade_forest.predict(X_test)
+    
+    # Evaluate model
+    train_r2 = r2_score(y_train, y_pred_train)
+    test_r2 = r2_score(y_test, y_pred_test)
+    train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+    test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+    
+    print("\nModel Evaluation:")
+    print(f"Training R²: {train_r2:.4f}")
+    print(f"Testing R²:  {test_r2:.4f}")
+    print(f"Training RMSE: {train_rmse:,.0f}")
+    print(f"Testing RMSE:  {test_rmse:,.0f}")
+    
+    # Feature importance visualization
+    last_rf = cascade_forest.layers[-1]
+    importances = last_rf.feature_importances_
+    features = X.columns.tolist()
+    
+    # Add prediction features from previous layers
+    for i in range(len(cascade_forest.layers)-1):
+        features.append(f'layer_{i}_pred')
+    
+    # Sort feature importances
+    indices = np.argsort(importances)[::-1]
+    sorted_features = [features[i] for i in indices]
+    sorted_importances = importances[indices]
+    
+    # Plot feature importances
+    plt.figure(figsize=(12, 8))
+    plt.title("Feature Importances (Last Layer)")
+    plt.barh(sorted_features[:15], sorted_importances[:15], align='center')
+    plt.gca().invert_yaxis()
+    plt.xlabel('Importance Score')
+    plt.tight_layout()
+    plt.savefig('feature_importances.png', bbox_inches='tight')
+    plt.close()
+    print("\nFeature importance plot saved as 'feature_importances.png'")
+    
+    # Actual vs Predicted plot
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_test, y_pred_test, alpha=0.6)
+    plt.plot([y.min(), y.max()], [y.min(), y.max()], 'k--', lw=2)
+    plt.xlabel('Actual Price')
+    plt.ylabel('Predicted Price')
+    plt.title('Actual vs Predicted Housing Prices')
+    plt.grid(True)
+    plt.savefig('actual_vs_predicted.png', bbox_inches='tight')
+    plt.close()
+    print("Actual vs Predicted plot saved as 'actual_vs_predicted.png'")
+
+if __name__ == "__main__":
+    main()
